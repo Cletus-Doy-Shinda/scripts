@@ -1,0 +1,132 @@
+#!/bin/bash
+# discover all hosts on a network, their ip addresses, MAC addresses,
+# and which services are running on which ports
+
+function usage {
+    printf "$(basename $0): Local Network DISCovery - used to discover other "
+    printf "hosts in a LAN\n"
+    printf "usage: lsdisc [-lsv]\n"
+    printf "\t -l: list other hosts in the network\n"
+    printf "\t -s: perform active sniffing on one of the hosts listed. This\n"
+    printf "\t     is accomplished by poisoning the ARP cache on both the\n"
+    printf "\t     selected host and the gateway (router) and running\n"
+    printf "\t     tcpdump filtered for the selected host\n"
+    printf "\t -v: run 'nmap' on each host for detailed, verbose info\n\n"
+}
+if [ $# -eq 0 ]; then
+    usage
+    exit 1
+fi
+
+JUST_LIST=0
+SNIFF=0
+VERBOSE=0
+while getopts ":lsv" opt; do
+    case "$opt" in
+        l)
+            JUST_LIST=1
+            ;;
+        s)
+            SNIFF=1
+            ;;
+        v)
+            VERBOSE=1
+            ;;
+        :)
+            echo Option -$OPTARG requires param
+    esac
+done
+
+# get my ip address
+DEV=`ifconfig -s | grep BMRU | awk '{print $1}'`
+MY_ADDR=`ifconfig "$DEV" | grep 'inet addr' | awk '{print $2}' | cut -d ':' -f2`
+MY_MAC=`ifconfig wlan0 | grep HWaddr | awk '{print $5}'`
+echo My IP address: $MY_ADDR
+
+# get default Gateway
+GATEADD=`route -n | grep UG | awk '{print $2}'`
+GATEMAC=`arp -an | grep \("$GATEADD"\) | awk '{print $4}'`
+echo Default Gateway: "$GATEADD" "($GATEMAC)"
+
+# read addres into array split on '.'. Get IPs of hosts in the range:
+# my ip - 15
+# my ip + 5
+IFS='.'; read -ra ARRAY <<< "$MY_ADDR"
+unset IFS
+START=$((${ARRAY[3]} - 2))
+END=$((${ARRAY[3]} + 0))
+
+# populate arp table by pinging hosts
+echo "Scanning for hosts on network..."
+IPS=()
+for i in `seq $START $END`; do
+    ADDR=${ARRAY[0]}.${ARRAY[1]}.${ARRAY[2]}.$i
+    ping -c 1 -w 0.2 "$ADDR" > /dev/null
+
+    if [ $? -eq 0 ]; then
+        # map ip -> mac address
+        if [ $ADDR != $MY_ADDR ]; then
+            MAC=`arp -an | grep "$ADDR" | awk '{print $4}'`
+            IPS+=("$ADDR=$MAC")
+        fi
+    fi
+done
+
+printf "\n====================\n"
+printf "Hosts:\n"
+printf "====================\n"
+COUNT=0
+for IP in "${IPS[@]}"; do
+    IFS='='; read -ra VALUES <<< "$IP"; unset IFS
+    if [ $SNIFF -eq 1 ]; then
+        echo "[$COUNT] ${VALUES[0]} (${VALUES[1]})"
+        COUNT=$(($COUNT + 1))
+    else
+        echo "${VALUES[0]} (${VALUES[1]})"
+    fi
+done
+
+if [ $JUST_LIST -eq 1 ]; then
+    exit 0
+fi
+
+# run nmap on each host
+if [ $VERBOSE -eq  1 ]; then
+    for IP in "${IPS[@]}"; do
+        IFS='='; read -ra VALUES <<< "$IP"; unset IFS
+        nmap -A -T4 -PN "${VALUES[0]}"
+        printf "\n=================================================="
+        printf "==============================\n"
+    done
+fi
+
+if [ $SNIFF -eq 1 ]; then
+    echo "You have chosen to sniff packets traveling to/from a particular host."
+    read -p "Please select the host IP address from the list above: " num
+    IFS='='; read -ra VALUES <<< "${IPS[$num]}"; unset IFS
+    echo "Sniff packets on ${VALUES[0]} (type number next to action)?"
+    select yn in "Yes" "No"; do
+        case "$yn" in
+            Yes)
+                IP_TO_SNIFF=${VALUES[0]}
+                MAC_TO_SNIFF=${VALUES[1]}
+                break;;
+            No)
+                exit;;
+        esac
+    done
+fi
+
+if [ -n "$IP_TO_SNIFF" ]; then
+    printf "Roger,\n"
+    echo "commence ARP cache poisoning and tcpdump on $IP_TO_SNIFF ($MAC_TO_SNIFF)"
+
+    # turn on IP forwarding
+    # sudo sysctl -w net.ipv4.ip_forward=1
+    # /bin/bash inject.sh $IP_TO_SNIFF $MAC_TO_SNIFF $GATEADD $GATEMAC $MY_MAC $DEV $> /dev/null &
+
+    # sudo tcpdump -i $DEV -l -A "ip host $IP_TO_SNIFF" -w /tmp/packets.dump
+fi
+
+
+# sysctl -w net.ipv4.ip_forward=1
